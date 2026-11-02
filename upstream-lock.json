@@ -1,0 +1,15 @@
+{
+  "decky-translator": {
+    "url": "https://github.com/cat-in-a-box/Decky-Translator",
+    "commit": "4358712ac2f0fb211462a573f554396d572e2095",
+    "files": {
+      "runtime/vendor/providers/chromescreenai_subprocess.py": "a0da7d3b2611ea7f3fda9cb86894d88ddfd728949ebc7aa1bfbd105a1ec8d5b6",
+      "runtime/vendor/providers/chromescreenai_protos/chrome_screen_ai_pb2.py": "a89773d20ddc40b7feb4de17284291ee3488d80b28fd93c7d34cb0edd6b2a234"
+    }
+  },
+  "livetranslate-decky": {
+    "url": "https://github.com/neatsorg/livetranslate-decky",
+    "commit": "bd8f9f49697267e86b61380d89203da8b82c781d",
+    "adapted": ["src/Composition.tsx"]
+  }
+}

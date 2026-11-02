@@ -1,0 +1,26 @@
+[project]
+name = "decky-live-caption"
+version = "0.1.0a2"
+requires-python = ">=3.12"
+description = "Decky caption pipeline and isolated Screen AI runtime"
+license = "GPL-3.0-only"
+dependencies = []
+
+[project.optional-dependencies]
+runtime = ["Pillow==12.0.0", "protobuf==6.33.1"]
+
+[dependency-groups]
+dev = ["pytest==8.4.2", "pytest-asyncio==1.2.0", "ruff==0.14.3"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = ["runtime/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
