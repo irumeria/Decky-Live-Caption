@@ -1,24 +1,24 @@
 import { definePlugin, routerHook } from "@decky/api";
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField,
   TextField, ToggleField, staticClasses } from "@decky/ui";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FaClosedCaptioning } from "react-icons/fa";
 import { compositionAvailable } from "./Composition";
 import { Subtitle } from "./Subtitle";
-import { beginPolling, endPolling, manageDownload, saveConfig, toggleCapture, useBackend } from "./store";
+import { beginPolling, editConfig, endPolling, manageDownload,
+  toggleCapture, useBackend } from "./store";
+import { changeEdge, edgeLimits, edges } from "./regions";
+import type { Edge, Region } from "./regions";
 import type { Config } from "./types";
 
 function Content() {
-  const { state, error } = useBackend();
-  const [draft, setDraft] = useState<Config | null>(null);
+  const { state, error, draft, saving, settingsMessage } = useBackend();
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState("");
-  useEffect(() => { if (state && draft === null) setDraft(state.config); }, [state, draft]);
   if (!state || !draft) return <PanelSection title="Live Caption">
     <PanelSectionRow>{error || "正在连接插件后端…"}</PanelSectionRow>
   </PanelSection>;
   const change = <K extends keyof Config>(key: K, value: Config[K]) => {
-    setDraft({ ...draft, [key]: value }); setSaved("");
+    editConfig({ [key]: value });
   };
   const field = (key: keyof Config, label: string) => <PanelSectionRow key={key}>
     <TextField label={label} value={String(draft[key])}
@@ -29,6 +29,15 @@ function Content() {
       min={min} max={max} step={step} showValue onChange={(value) => change(key, value)} />
     </PanelSectionRow>;
 
+  const boundary = (region: Region, edge: Edge, label: string) => {
+    const [min, max] = edgeLimits(draft, region, edge);
+    return <PanelSectionRow key={`${region}-${edge}`}>
+      <SliderField label={`${label}（%）`} value={edges(draft, region)[edge]}
+        min={min} max={max} step={1} showValue
+        onChange={(value) => editConfig(changeEdge(draft, region, edge, value))} />
+    </PanelSectionRow>;
+  };
+
   return <>
     <PanelSection title={"Live Caption · Alpha"}>
       <PanelSectionRow>{"状态："}{state.status.phase}</PanelSectionRow>
@@ -36,11 +45,29 @@ function Content() {
       {!compositionAvailable && <PanelSectionRow>
         {"当前 Steam UI 无法提供被动字幕层。请勿启动，需更新适配。"}
       </PanelSectionRow>}
-      <PanelSectionRow><ButtonItem disabled={busy || !compositionAvailable} onClick={async () => {
+      <PanelSectionRow><ButtonItem disabled={busy || saving || !compositionAvailable} onClick={async () => {
         setBusy(true); try { await toggleCapture(); } finally { setBusy(false); }
       }}>{state.status.running ? "停止识别" : "开始自动识别"}</ButtonItem></PanelSectionRow>
       <PanelSectionRow>{`OCR ${state.status.ocr_ms.toFixed(0)} ms · 翻译 ${state.status.translation_ms.toFixed(0)} ms · 缓存 ${state.status.cache_hits}`}</PanelSectionRow>
-      <PanelSectionRow>{"保存会停止当前会话；启动使用已保存配置。退出或切换游戏会自动停止。"}</PanelSectionRow>
+      <PanelSectionRow>{"修改后自动保存并应用，无需点保存。连续调整结束约 0.6 秒后生效。识别会短暂重启，不退出游戏。"}</PanelSectionRow>
+      {settingsMessage && <PanelSectionRow>{settingsMessage}</PanelSectionRow>}
+    </PanelSection>
+    <PanelSection title={"识别区域"}>
+      <PanelSectionRow>{"左右从屏幕左侧计算，上下从屏幕顶部计算。0% 是左/上边缘，100% 是右/下边缘。"}</PanelSectionRow>
+      {boundary("ocr", "left", "左边界")}
+      {boundary("ocr", "right", "右边界")}
+      {boundary("ocr", "top", "上边界")}
+      {boundary("ocr", "bottom", "下边界")}
+    </PanelSection>
+    <PanelSection title={"字幕条"}>
+      {boundary("subtitle", "left", "左边界")}
+      {boundary("subtitle", "right", "右边界")}
+      {boundary("subtitle", "top", "上边界")}
+      {boundary("subtitle", "bottom", "下边界")}
+      {slider("subtitle_opacity", "背景不透明度（0 为透明）", 0, 1, 0.05)}
+      {slider("font_size", "字号", 14, 48, 1)}
+      <PanelSectionRow><ToggleField label={"同时显示原文"} checked={draft.show_source}
+        onChange={(value) => change("show_source", value)} /></PanelSectionRow>
     </PanelSection>
     <PanelSection title={"OCR 运行环境"}>
       {field("python", "独立 Python 路径")}
@@ -61,8 +88,7 @@ function Content() {
         {"取消下载"}
       </ButtonItem></PanelSectionRow>}
       {state.download.phase === "ready" && <PanelSectionRow><ButtonItem onClick={() => {
-        setDraft({ ...draft, ...state.download.paths, translator: "hymt" });
-        setSaved("已填入下载路径，请保存配置");
+        editConfig({ ...state.download.paths, translator: "hymt" });
       }}>{"使用已下载的模型"}</ButtonItem></PanelSectionRow>}
       <PanelSectionRow><DropdownItem label={"后端"} selectedOption={draft.translator}
         rgOptions={[{ label: "仅识别（不联网）", data: "source" },
@@ -74,29 +100,6 @@ function Content() {
       {field("hymt_model", "本地 Hy-MT2 GGUF 路径")}
       {slider("hymt_gpu_layers", "GPU 层数（0 为 CPU）", 0, 99, 1)}
       {slider("hymt_threads", "本地推理 CPU 线程", 1, 8, 1)}
-    </PanelSection>
-    <PanelSection title={"识别区域（屏幕比例）"}>
-      {slider("roi_x", "左边界", 0, 0.9, 0.05)}
-      {slider("roi_y", "上边界", 0, 0.9, 0.05)}
-      {slider("roi_width", "宽度", 0.1, 1, 0.05)}
-      {slider("roi_height", "高度", 0.05, 0.8, 0.05)}
-    </PanelSection>
-    <PanelSection title={"字幕条"}>
-      {slider("subtitle_left", "字幕左边界", 0, 0.95, 0.01)}
-      {slider("subtitle_top", "字幕上边界", 0, 0.8, 0.05)}
-      {slider("subtitle_width", "字幕宽度", 0.05, 1, 0.01)}
-      {slider("subtitle_height", "字幕最大高度", 0.05, 0.4, 0.05)}
-      {slider("subtitle_opacity", "背景不透明度（0 为透明）", 0, 1, 0.05)}
-      {slider("font_size", "字号", 14, 48, 1)}
-      <PanelSectionRow><ToggleField label={"同时显示原文"} checked={draft.show_source}
-        onChange={(value) => change("show_source", value)} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem disabled={busy} onClick={async () => {
-        setBusy(true);
-        try { setDraft(await saveConfig(draft)); setSaved("配置已保存"); }
-        catch { setSaved(""); /* The store exposes backend validation errors. */ }
-        finally { setBusy(false); }
-      }}>{"保存配置"}</ButtonItem></PanelSectionRow>
-      {saved && <PanelSectionRow>{saved}</PanelSectionRow>}
     </PanelSection>
   </>;
 }

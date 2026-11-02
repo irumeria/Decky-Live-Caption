@@ -2,6 +2,7 @@ import { callable } from "@decky/api";
 import { Router } from "@decky/ui";
 import { useSyncExternalStore } from "react";
 import type { Config, State } from "./types";
+import { SettingsDraft } from "./settings";
 
 const getState = callable<[], State>("get_state");
 const startCapture = callable<[], State>("start");
@@ -10,10 +11,18 @@ const configure = callable<[Config], State>("save_config");
 const setMenuOpen = callable<[boolean], State>("set_menu_open");
 const downloadModels = callable<[], State>("download_models");
 const cancelDownload = callable<[], State>("cancel_download");
-let snapshot: { state: State | null; error: string } = { state: null, error: "" };
+const settings = new SettingsDraft();
+let saving = false;
+let settingsMessage = "";
+let failedRevision: number | null = null;
+let snapshot: { state: State | null; error: string; draft: Config | null;
+  dirty: boolean; saving: boolean; settingsMessage: string } = {
+  state: null, error: "", draft: null, dirty: false, saving: false, settingsMessage: "",
+};
 const listeners = new Set<() => void>();
 let disposed = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
+let saveTimer: ReturnType<typeof setTimeout> | undefined;
 let version = 0;
 let ownerApp: string | null = null;
 let actionError = "";
@@ -36,7 +45,8 @@ function appId(): string | null {
 
 function update(state: State | null, error = actionError) {
   if (disposed) return;
-  snapshot = { state, error };
+  if (state) settings.receive(state.config);
+  snapshot = { state, error, draft: settings.config, dirty: settings.dirty, saving, settingsMessage };
   listeners.forEach((listener) => listener());
 }
 
@@ -47,20 +57,58 @@ export function useBackend() {
   }, () => snapshot);
 }
 
-export async function saveConfig(config: Config) {
-  const request = ++version;
+export function editConfig(patch: Partial<Config>) {
+  settings.edit(patch);
   actionError = "";
+  settingsMessage = "待自动保存…";
+  update(snapshot.state);
+  scheduleSave();
+}
+
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  // Slider drags emit many values. Apply the final value without restarting OCR for every pixel.
+  saveTimer = setTimeout(() => { void applyDraft(); }, 600);
+}
+
+export async function applyDraft() {
+  if (saving || !settings.dirty || !settings.config) return;
+  clearTimeout(saveTimer);
+  const request = ++version;
+  const revision = settings.revision;
+  const config = settings.config;
+  const resumeApp = snapshot.state?.status.running ? ownerApp : null;
+  saving = true;
+  actionError = "";
+  settingsMessage = "正在保存并应用…";
+  update(snapshot.state);
   try {
-    const state = await configure(config);
-    ownerApp = null;
+    let state = await configure(config);
+    // A plugin unload can complete while the backend is saving. Do not revive its worker.
+    if (disposed || request !== version) return;
+    settings.saved(state.config, revision);
+    settingsMessage = settings.dirty ? "仍有新修改待保存" : "已保存并应用";
     if (version === request) update(state);
-    return state.config;
+    // Saving stops the worker. Resume only the same game session, never another game.
+    if (resumeApp !== null && appId() === resumeApp) {
+      lastMenuOpen = menuOpen();
+      await setMenuOpen(lastMenuOpen);
+      if (disposed || request !== version) return;
+      state = await startCapture();
+      if (disposed) { await stopCapture(); return; }
+    } else { ownerApp = null; }
+    if (version === request) update(state);
   } catch (error) {
     if (version === request) {
+      failedRevision = revision;
       actionError = String(error);
+      settingsMessage = settings.dirty ? "保存失败；修改已保留，修正后会自动保存" : "配置已保存，但识别启动失败";
       update(snapshot.state);
     }
-    throw error;
+  } finally {
+    saving = false;
+    update(snapshot.state);
+    if (!disposed && settings.dirty && failedRevision !== settings.revision) scheduleSave();
   }
 }
 
@@ -71,6 +119,11 @@ export async function manageDownload(cancel = false) {
 }
 
 export async function toggleCapture() {
+  if (saving) return;
+  if (settings.dirty) {
+    await applyDraft();
+    if (settings.dirty || actionError) return;
+  }
   const request = ++version;
   actionError = "";
   try {
@@ -99,16 +152,22 @@ export function beginPolling() {
   async function poll() {
     const request = version;
     try {
+      if (saving) return;
       let state = await getState();
-      if (request !== version || disposed) return;
+      if (request !== version || disposed || saving) return;
+      let opened: boolean;
+      try { opened = menuOpen(); }
+      catch (error) {
+        if (state.status.running) await stopCapture();
+        ownerApp = null;
+        throw error;
+      }
+      // Closing QAM must not discard edits. Invalid input stays editable without retry loops.
+      if (!opened && settings.dirty && failedRevision !== settings.revision) {
+        await applyDraft();
+        return;
+      }
       if (state.status.running) {
-        let opened: boolean;
-        try { opened = menuOpen(); }
-        catch (error) {
-          state = await stopCapture();
-          ownerApp = null;
-          throw error;
-        }
         if (opened !== lastMenuOpen) {
           state = await setMenuOpen(opened);
           lastMenuOpen = opened;
@@ -133,6 +192,7 @@ export function endPolling() {
   disposed = true;
   version++;
   clearTimeout(timer);
+  clearTimeout(saveTimer);
   listeners.clear();
   // The Python _unload hook also stops the process group if the frontend disappears.
   void stopCapture().catch(() => { /* The backend can already be unloaded. */ });
